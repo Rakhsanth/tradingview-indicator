@@ -1,0 +1,38 @@
+//@version=6
+indicator("Trend Momentum", overlay=true, max_labels_count=500)
+
+fastLen = input.int(21, "Fast EMA", minval=1)
+slowLen = input.int(50, "Slow EMA", minval=1)
+rsiLen = input.int(14, "RSI Length", minval=1)
+rsiOb = input.int(70, "RSI Overbought", minval=50, maxval=100)
+rsiOs = input.int(30, "RSI Oversold", minval=0, maxval=50)
+showFill = input.bool(true, "Show trend fill")
+showSignals = input.bool(true, "Show signals")
+
+fastEma = ta.ema(close, fastLen)
+slowEma = ta.ema(close, slowLen)
+rsi = ta.rsi(close, rsiLen)
+
+bullTrend = fastEma > slowEma
+bearTrend = fastEma < slowEma
+bullMomentum = rsi > 50 and rsi < rsiOb
+bearMomentum = rsi < 50 and rsi > rsiOs
+
+longSignal = bullTrend and ta.crossover(rsi, 50)
+shortSignal = bearTrend and ta.crossunder(rsi, 50)
+
+plot(fastEma, "Fast EMA", color=color.new(#4caf50, 0), linewidth=2)
+plot(slowEma, "Slow EMA", color=color.new(#ff9800, 0), linewidth=2)
+
+bullColor = color.new(#26a69a, 85)
+bearColor = color.new(#ef5350, 85)
+fillColor = bullTrend ? bullColor : bearTrend ? bearColor : na
+fastPlot = plot(fastEma, display=display.none)
+slowPlot = plot(slowEma, display=display.none)
+fill(fastPlot, slowPlot, color=showFill ? fillColor : na, title="Trend fill")
+
+plotshape(showSignals and longSignal, title="Long", style=shape.triangleup, location=location.belowbar, color=color.new(#26a69a, 0), size=size.small)
+plotshape(showSignals and shortSignal, title="Short", style=shape.triangledown, location=location.abovebar, color=color.new(#ef5350, 0), size=size.small)
+
+alertcondition(longSignal, title="Long signal", message="Trend Momentum long")
+alertcondition(shortSignal, title="Short signal", message="Trend Momentum short")

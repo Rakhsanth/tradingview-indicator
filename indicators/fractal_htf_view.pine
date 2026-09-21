@@ -1,0 +1,151 @@
+//@version=6
+indicator("Fractal HTF View", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=100)
+
+// ---------- Inputs ----------
+grpHtf = "Higher timeframe"
+autoHtf = input.bool(true, "Auto HTF pairing", group=grpHtf, tooltip="1m-3m -> 15m, 5m -> 1H, 15m -> 4H, 30m-1H -> D, 4H -> W, D -> M")
+manualHtf = input.timeframe("60", "Manual HTF", group=grpHtf)
+numCandles = input.int(6, "HTF candles shown", minval=1, maxval=40, group=grpHtf)
+
+grpView = "Panel"
+offsetBars = input.int(10, "Offset from last bar", minval=1, maxval=100, group=grpView)
+bodyWidth = input.int(5, "Candle width (bars)", minval=1, maxval=15, group=grpView)
+gapWidth = input.int(3, "Gap between candles (bars)", minval=1, maxval=15, group=grpView)
+showOpenLine = input.bool(true, "Line from live HTF open", group=grpView)
+showHtfStart = input.bool(true, "Mark HTF candle starts on chart", group=grpView)
+bullCol = input.color(#26a69a, "Bull", group=grpView)
+bearCol = input.color(#ef5350, "Bear", group=grpView)
+
+grpTs = "T-Spot"
+showTspot = input.bool(true, "Show T-Spots", group=grpTs)
+sweepDir = input.bool(true, "Sweep overrides direction", group=grpTs, tooltip="A candle that takes the previous candle's high and closes back below it counts as bearish regardless of its own open/close, and the mirror case counts as bullish. When both extremes are swept, the usual close-vs-open reading is used.")
+tspotAll = input.bool(true, "All candle pairs (off = only previous candle)", group=grpTs)
+tspotMode = input.string("Auto", "Range mode", options=["Auto", "Wick to wick", "Wick to close"], group=grpTs, tooltip="Auto switches to wick-to-close when the close is too near the wick-to-wick 50%.")
+closeThr = input.float(33.0, "Auto: close within % of range from 50%", minval=0, maxval=50, step=1, group=grpTs, tooltip="Distance of the close beyond the 50% (in the candle's direction), as % of the wick-to-wick range. Below this -> wick to close. A close on the wrong side of the 50% always uses wick to close.") / 100
+tsGreen = input.color(color.new(#4caf50, 82), "Respect zone (50% to close side)", group=grpTs)
+tsGray = input.color(color.new(color.gray, 100), "Other half (100 = invisible)", group=grpTs)
+tsLine = input.color(#4caf50, "50% line", group=grpTs)
+tsEdge = input.color(color.new(color.gray, 20), "Edge lines", group=grpTs)
+
+// ---------- HTF pairing ----------
+f_autoHtf() =>
+    s = timeframe.in_seconds()
+    s <= 180 ? "15" : s <= 300 ? "60" : s <= 900 ? "240" : s <= 3600 ? "D" : s <= 14400 ? "W" : "M"
+
+htf = autoHtf ? f_autoHtf() : manualHtf
+htfValid = timeframe.in_seconds(htf) > timeframe.in_seconds()
+
+// ---------- Build HTF candles from chart bars ----------
+var float[] hO = array.new_float()
+var float[] hH = array.new_float()
+var float[] hL = array.new_float()
+var float[] hC = array.new_float()
+var bool[] hBull = array.new_bool()
+var int liveStartBar = na
+
+// Direction of a closed candle. A sweep of the previous candle's extreme that closes
+// back inside overrides the usual close-vs-open reading.
+f_dir(o, h, l, c, prevH, prevL) =>
+    tookHigh = sweepDir and h > prevH and c < prevH
+    tookLow = sweepDir and l < prevL and c > prevL
+    tookHigh and not tookLow ? false : tookLow and not tookHigh ? true : c >= o
+
+newHtf = timeframe.change(htf) or array.size(hO) == 0
+if htfValid
+    if newHtf
+        // The candle that just closed now has final OHLC and its predecessor is still
+        // in the buffer, so settle its direction before it can be trimmed away.
+        sz = array.size(hO)
+        if sz >= 2
+            jc = sz - 1
+            array.set(hBull, jc, f_dir(array.get(hO, jc), array.get(hH, jc), array.get(hL, jc), array.get(hC, jc), array.get(hH, jc - 1), array.get(hL, jc - 1)))
+        array.push(hO, open)
+        array.push(hH, high)
+        array.push(hL, low)
+        array.push(hC, close)
+        array.push(hBull, close >= open)
+        liveStartBar := bar_index
+        if array.size(hO) > numCandles
+            array.shift(hO)
+            array.shift(hH)
+            array.shift(hL)
+            array.shift(hC)
+            array.shift(hBull)
+    else
+        last = array.size(hO) - 1
+        array.set(hH, last, math.max(array.get(hH, last), high))
+        array.set(hL, last, math.min(array.get(hL, last), low))
+        array.set(hC, last, close)
+        array.set(hBull, last, close >= open)
+
+if htfValid and showHtfStart and newHtf
+    line.new(bar_index, low, bar_index, high, color=color.new(color.gray, 60), style=line.style_dotted, extend=extend.both)
+
+// ---------- Draw panel on last bar ----------
+var box[] bodies = array.new_box()
+var line[] wicks = array.new_line()
+var line openLn = na
+var label htfLbl = na
+
+if barstate.islast
+    for b in bodies
+        box.delete(b)
+    for w in wicks
+        line.delete(w)
+    array.clear(bodies)
+    array.clear(wicks)
+    line.delete(openLn)
+    label.delete(htfLbl)
+
+    if htfValid
+        n = array.size(hO)
+        x0 = bar_index + offsetBars
+        step = bodyWidth + gapWidth
+        half = math.floor(bodyWidth / 2)
+
+        // T-Spot of candle i spans from its center to the center of candle i+1 (drawn first so candles sit on top)
+        if showTspot
+            for i = (tspotAll ? 0 : n - 2) to n - 2
+                if i >= 0
+                    h = array.get(hH, i)
+                    l = array.get(hL, i)
+                    c = array.get(hC, i)
+                    rng = h - l
+                    if rng > 0
+                        bull = array.get(hBull, i)
+                        dirDist = (bull ? (c - (h + l) / 2) : ((h + l) / 2 - c)) / rng
+                        useClose = tspotMode == "Wick to close" or (tspotMode == "Auto" and dirDist < closeThr)
+                        top = useClose ? (bull ? c : h) : h
+                        bot = useClose ? (bull ? l : c) : l
+                        mid = (top + bot) / 2
+                        xa = x0 + i * step + half
+                        xb = x0 + (i + 1) * step + half
+                        greenTop = bull ? top : mid
+                        greenBot = bull ? mid : bot
+                        grayTop = bull ? mid : top
+                        grayBot = bull ? bot : mid
+                        array.push(bodies, box.new(xa, greenTop, xb, greenBot, border_color=na, bgcolor=tsGreen))
+                        array.push(bodies, box.new(xa, grayTop, xb, grayBot, border_color=na, bgcolor=tsGray))
+                        array.push(wicks, line.new(xa, top, xb, top, color=tsEdge))
+                        array.push(wicks, line.new(xa, bot, xb, bot, color=tsEdge))
+                        array.push(wicks, line.new(xa, mid, xb, mid, color=tsLine, width=1))
+
+        for i = 0 to n - 1
+            o = array.get(hO, i)
+            h = array.get(hH, i)
+            l = array.get(hL, i)
+            c = array.get(hC, i)
+            col = c >= o ? bullCol : bearCol
+            xl = x0 + i * step
+            xr = xl + bodyWidth
+            xc = xl + math.floor(bodyWidth / 2)
+            array.push(wicks, line.new(xc, h, xc, l, color=col, width=1))
+            array.push(bodies, box.new(xl, math.max(o, c), xr, math.min(o, c), border_color=col, bgcolor=color.new(col, 30)))
+        if n > 0
+            xLive = x0 + (n - 1) * step
+            liveOpen = array.get(hO, n - 1)
+            if showOpenLine
+                openLn := line.new(liveStartBar, liveOpen, xLive, liveOpen, color=color.new(color.gray, 30), style=line.style_dashed)
+            htfLbl := label.new(xLive + math.floor(bodyWidth / 2), array.get(hH, n - 1), str.upper(htf) + " (live)", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=chart.fg_color, size=size.small)
+    else
+        htfLbl := label.new(bar_index, high, "HTF must be higher than chart timeframe", style=label.style_label_down, color=color.orange, textcolor=color.black)

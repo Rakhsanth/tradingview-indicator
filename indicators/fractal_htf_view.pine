@@ -12,6 +12,7 @@ offsetBars = input.int(10, "Offset from last bar", minval=1, maxval=100, group=g
 bodyWidth = input.int(5, "Candle width (bars)", minval=1, maxval=15, group=grpView)
 gapWidth = input.int(3, "Gap between candles (bars)", minval=1, maxval=15, group=grpView)
 showOpenLine = input.bool(true, "Line from live HTF open", group=grpView)
+showLiveLabel = input.bool(false, "Show live HTF label", group=grpView)
 showHtfStart = input.bool(true, "Mark HTF candle starts on chart", group=grpView)
 bullCol = input.color(#26a69a, "Bull", group=grpView)
 bearCol = input.color(#ef5350, "Bear", group=grpView)
@@ -146,6 +147,7 @@ if barstate.islast
             liveOpen = array.get(hO, n - 1)
             if showOpenLine
                 openLn := line.new(liveStartBar, liveOpen, xLive, liveOpen, color=color.new(color.gray, 30), style=line.style_dashed)
-            htfLbl := label.new(xLive + math.floor(bodyWidth / 2), array.get(hH, n - 1), str.upper(htf) + " (live)", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=chart.fg_color, size=size.small)
+            if showLiveLabel
+                htfLbl := label.new(xLive + math.floor(bodyWidth / 2), array.get(hH, n - 1), str.upper(htf) + " (live)", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=chart.fg_color, size=size.small)
     else
         htfLbl := label.new(bar_index, high, "HTF must be higher than chart timeframe", style=label.style_label_down, color=color.orange, textcolor=color.black)

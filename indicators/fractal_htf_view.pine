@@ -1,5 +1,5 @@
 //@version=6
-indicator("Fractal HTF View", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=100)
+indicator("Fractal HTF View", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=100)
 
 // ---------- Inputs ----------
 grpHtf = "Higher timeframe"
@@ -12,9 +12,11 @@ offsetBars = input.int(10, "Offset from last bar", minval=1, maxval=100, group=g
 bodyWidth = input.int(5, "Candle width (bars)", minval=1, maxval=15, group=grpView)
 gapWidth = input.int(3, "Gap between candles (bars)", minval=1, maxval=15, group=grpView)
 showOpenLine = input.bool(true, "Line from live HTF open", group=grpView)
+showLiveLabel = input.bool(false, "Show live HTF label", group=grpView)
 showHtfStart = input.bool(true, "Mark HTF candle starts on chart", group=grpView)
 bullCol = input.color(#26a69a, "Bull", group=grpView)
 bearCol = input.color(#ef5350, "Bear", group=grpView)
+wickCol = input.color(color.black, "Wick", group=grpView)
 
 grpTs = "T-Spot"
 showTspot = input.bool(true, "Show T-Spots", group=grpTs)
@@ -26,6 +28,22 @@ tsGreen = input.color(color.new(#4caf50, 82), "Respect zone (50% to close side)"
 tsGray = input.color(color.new(color.gray, 100), "Other half (100 = invisible)", group=grpTs)
 tsLine = input.color(#4caf50, "50% line", group=grpTs)
 tsEdge = input.color(color.new(color.gray, 20), "Edge lines", group=grpTs)
+
+grpCisd = "CISD (reversal marker)"
+showCisd = input.bool(true, "Show CISD lines", group=grpCisd, tooltip="A bullish candle closing above the open of the run of down-close candles right before it, or the mirror case for a bearish candle. Drawn on the chart's own timeframe.")
+cisdBullCol = input.color(#2962FF, "Bullish reversal", group=grpCisd)
+cisdBearCol = input.color(#2962FF, "Bearish reversal", group=grpCisd)
+cisdWidth = input.int(2, "Line width", minval=1, maxval=5, group=grpCisd)
+cisdMaxLines = input.int(50, "Max lines kept", minval=5, maxval=250, group=grpCisd)
+cisdMaxArmed = input.int(20, "Max armed levels per side", minval=1, maxval=100, group=grpCisd, tooltip="How many unconfirmed run levels stay waiting on each side. A level can be confirmed many candles after it forms; once this many newer ones exist, the oldest is dropped.")
+showCisdArea = input.bool(true, "Extend latest CISD as an area", group=grpCisd, tooltip="Only the most recent CISD gets an area. It spans the CISD level to the furthest close reached during the run, and extends right until a close pushes fully past its far edge.")
+cisdAreaCol = input.color(color.new(#2962FF, 88), "Area fill", group=grpCisd)
+
+grpFvg = "Fair Value Gaps"
+showFvg = input.bool(true, "Show FVGs", group=grpFvg)
+fvgBullCol = input.color(color.new(#26a69a, 85), "Bullish FVG", group=grpFvg)
+fvgBearCol = input.color(color.new(#ef5350, 85), "Bearish FVG", group=grpFvg)
+fvgMaxKept = input.int(30, "Max FVGs kept", minval=1, maxval=150, group=grpFvg)
 
 // ---------- HTF pairing ----------
 f_autoHtf() =>
@@ -80,6 +98,178 @@ if htfValid
 
 if htfValid and showHtfStart and newHtf
     line.new(bar_index, low, bar_index, high, color=color.new(color.gray, 60), style=line.style_dotted, extend=extend.both)
+
+// ---------- CISD reversal marker (active chart timeframe) ----------
+// Tracks the current run of same-direction candles. When the run ends, the open of
+// its first candle stays armed as a reference level: the confirming close can arrive
+// several candles later, not only on the candle that first breaks the run. Once a
+// candle of the opposite direction closes through that level, draw a frozen line from
+// the run's start to that candle. Every finished run stays armed independently, so a
+// level set long ago still counts when price finally clears it, and one candle can
+// confirm several at once. The moment one confirms, every level still waiting on that
+// side is dropped: the leg has already been called, so anything left over is stale and
+// the next marks come from runs formed after it. A doji (close == open) is skipped: it
+// neither extends nor breaks a run.
+// Alongside each run's start level, the furthest close it reached is carried too: that
+// is the far edge of the area drawn for the most recent CISD.
+var int runStartBar = na
+var float runStartOpen = na
+var bool runDir = false
+var float runExtClose = na
+var int[] pendBullBar = array.new_int()
+var float[] pendBullLevel = array.new_float()
+var float[] pendBullExt = array.new_float()
+var int[] pendBearBar = array.new_int()
+var float[] pendBearLevel = array.new_float()
+var float[] pendBearExt = array.new_float()
+var line[] cisdLines = array.new_line()
+
+// Only the latest CISD carries an area, so a single box is reused.
+var box cisdArea = na
+var float cisdAreaTop = na
+var float cisdAreaBot = na
+var bool cisdAreaBull = false
+
+// Checked before this bar can create a new area, so a fresh one is never tested
+// against the candle that made it.
+if showCisd and showCisdArea and not na(cisdAreaBot)
+    if cisdAreaBull ? close < cisdAreaBot : close > cisdAreaTop
+        box.delete(cisdArea)
+        cisdArea := na
+        cisdAreaTop := na
+        cisdAreaBot := na
+
+if showCisd and close != open
+    dir = close > open
+    if na(runStartBar)
+        runStartBar := bar_index
+        runStartOpen := open
+        runDir := dir
+        runExtClose := close
+    else if dir != runDir
+        // The run just ended: arm its start as one more reference for the opposite side.
+        if runDir
+            array.push(pendBearBar, runStartBar)
+            array.push(pendBearLevel, runStartOpen)
+            array.push(pendBearExt, runExtClose)
+            if array.size(pendBearBar) > cisdMaxArmed
+                array.shift(pendBearBar)
+                array.shift(pendBearLevel)
+                array.shift(pendBearExt)
+        else
+            array.push(pendBullBar, runStartBar)
+            array.push(pendBullLevel, runStartOpen)
+            array.push(pendBullExt, runExtClose)
+            if array.size(pendBullBar) > cisdMaxArmed
+                array.shift(pendBullBar)
+                array.shift(pendBullLevel)
+                array.shift(pendBullExt)
+        runStartBar := bar_index
+        runStartOpen := open
+        runDir := dir
+        runExtClose := close
+    else
+        runExtClose := dir ? math.max(runExtClose, close) : math.min(runExtClose, close)
+
+    // Walk the armed levels newest-first, so the first one this close clears is also
+    // the most recently armed: that is the CISD the area gets drawn for.
+    if array.size(pendBullLevel) > 0
+        int hitBar = na
+        float hitLevel = na
+        float hitExt = na
+        if dir
+            for i = array.size(pendBullLevel) - 1 to 0
+                lv = array.get(pendBullLevel, i)
+                if close > lv
+                    array.push(cisdLines, line.new(array.get(pendBullBar, i), lv, bar_index, lv, color=cisdBullCol, width=cisdWidth, extend=extend.none))
+                    if array.size(cisdLines) > cisdMaxLines
+                        line.delete(array.shift(cisdLines))
+                    if na(hitBar)
+                        hitBar := array.get(pendBullBar, i)
+                        hitLevel := lv
+                        hitExt := array.get(pendBullExt, i)
+                    array.remove(pendBullBar, i)
+                    array.remove(pendBullLevel, i)
+                    array.remove(pendBullExt, i)
+        if not na(hitBar)
+            array.clear(pendBullBar)
+            array.clear(pendBullLevel)
+            array.clear(pendBullExt)
+            if showCisdArea
+                box.delete(cisdArea)
+                cisdArea := box.new(hitBar, hitLevel, bar_index, hitExt, border_color=na, bgcolor=cisdAreaCol, extend=extend.right)
+                cisdAreaTop := hitLevel
+                cisdAreaBot := hitExt
+                cisdAreaBull := true
+
+    if array.size(pendBearLevel) > 0
+        int hitBar = na
+        float hitLevel = na
+        float hitExt = na
+        if not dir
+            for i = array.size(pendBearLevel) - 1 to 0
+                lv = array.get(pendBearLevel, i)
+                if close < lv
+                    array.push(cisdLines, line.new(array.get(pendBearBar, i), lv, bar_index, lv, color=cisdBearCol, width=cisdWidth, extend=extend.none))
+                    if array.size(cisdLines) > cisdMaxLines
+                        line.delete(array.shift(cisdLines))
+                    if na(hitBar)
+                        hitBar := array.get(pendBearBar, i)
+                        hitLevel := lv
+                        hitExt := array.get(pendBearExt, i)
+                    array.remove(pendBearBar, i)
+                    array.remove(pendBearLevel, i)
+                    array.remove(pendBearExt, i)
+        if not na(hitBar)
+            array.clear(pendBearBar)
+            array.clear(pendBearLevel)
+            array.clear(pendBearExt)
+            if showCisdArea
+                box.delete(cisdArea)
+                cisdArea := box.new(hitBar, hitExt, bar_index, hitLevel, border_color=na, bgcolor=cisdAreaCol, extend=extend.right)
+                cisdAreaTop := hitExt
+                cisdAreaBot := hitLevel
+                cisdAreaBull := false
+
+// ---------- Fair Value Gaps (active chart timeframe) ----------
+// Three-candle gap: the middle candle runs far enough that candle 1 and candle 3 do
+// not overlap. The box extends right for as long as the gap is live. Only a close
+// fully through the gap invalidates it: wicks never do, however deep they mitigate,
+// and neither does a close landing inside the gap. An invalidated gap is removed from
+// the chart outright, so only live gaps are ever on screen.
+var box[] fvgBox = array.new_box()
+var float[] fvgTop = array.new_float()
+var float[] fvgBot = array.new_float()
+var bool[] fvgBull = array.new_bool()
+
+if showFvg
+    if array.size(fvgBox) > 0
+        // backwards, so removing an entry does not shift the indices still to check
+        for i = array.size(fvgBox) - 1 to 0
+            isBull = array.get(fvgBull, i)
+            // price has to close fully past the far side of the gap
+            if isBull ? close < array.get(fvgBot, i) : close > array.get(fvgTop, i)
+                box.delete(array.get(fvgBox, i))
+                array.remove(fvgBox, i)
+                array.remove(fvgTop, i)
+                array.remove(fvgBot, i)
+                array.remove(fvgBull, i)
+
+    if bar_index >= 2
+        bullGap = low > high[2]
+        bearGap = high < low[2]
+        if bullGap or bearGap
+            t = bullGap ? low : low[2]
+            b = bullGap ? high[2] : high
+            array.push(fvgBox, box.new(bar_index - 2, t, bar_index, b, border_color=na, bgcolor=bullGap ? fvgBullCol : fvgBearCol, extend=extend.right))
+            array.push(fvgTop, t)
+            array.push(fvgBot, b)
+            array.push(fvgBull, bullGap)
+            if array.size(fvgBox) > fvgMaxKept
+                box.delete(array.shift(fvgBox))
+                array.shift(fvgTop)
+                array.shift(fvgBot)
+                array.shift(fvgBull)
 
 // ---------- Draw panel on last bar ----------
 var box[] bodies = array.new_box()
@@ -139,13 +329,14 @@ if barstate.islast
             xl = x0 + i * step
             xr = xl + bodyWidth
             xc = xl + math.floor(bodyWidth / 2)
-            array.push(wicks, line.new(xc, h, xc, l, color=col, width=1))
+            array.push(wicks, line.new(xc, h, xc, l, color=wickCol, width=1))
             array.push(bodies, box.new(xl, math.max(o, c), xr, math.min(o, c), border_color=col, bgcolor=color.new(col, 30)))
         if n > 0
             xLive = x0 + (n - 1) * step
             liveOpen = array.get(hO, n - 1)
             if showOpenLine
                 openLn := line.new(liveStartBar, liveOpen, xLive, liveOpen, color=color.new(color.gray, 30), style=line.style_dashed)
-            htfLbl := label.new(xLive + math.floor(bodyWidth / 2), array.get(hH, n - 1), str.upper(htf) + " (live)", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=chart.fg_color, size=size.small)
+            if showLiveLabel
+                htfLbl := label.new(xLive + math.floor(bodyWidth / 2), array.get(hH, n - 1), str.upper(htf) + " (live)", style=label.style_label_down, color=color.new(color.gray, 70), textcolor=chart.fg_color, size=size.small)
     else
         htfLbl := label.new(bar_index, high, "HTF must be higher than chart timeframe", style=label.style_label_down, color=color.orange, textcolor=color.black)
